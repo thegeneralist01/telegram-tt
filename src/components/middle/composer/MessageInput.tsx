@@ -20,6 +20,7 @@ import { getIsDirectTextInputDisabled } from '../../../util/directInputManager';
 import parseEmojiOnlyString from '../../../util/emoji/parseEmojiOnlyString';
 import focusEditableElement from '../../../util/focusEditableElement';
 import { debounce } from '../../../util/schedulers';
+import { getCaretPosition, setCaretPosition } from '../../../util/selection';
 import {
   IS_ANDROID, IS_EMOJI_SUPPORTED, IS_IOS, IS_TOUCH_ENV,
 } from '../../../util/windowEnvironment';
@@ -82,6 +83,11 @@ type StateProps = {
   isSelectModeActive?: boolean;
   messageSendKeyCombo?: ISettings['messageSendKeyCombo'];
   canPlayAnimatedEmojis: boolean;
+};
+
+type TextSnapshot = {
+  text: string;
+  caretPosition: number;
 };
 
 const MAX_ATTACHMENT_MODAL_INPUT_HEIGHT = 160;
@@ -167,6 +173,12 @@ const MessageInput: FC<OwnProps & StateProps> = ({
   const sharedCanvasHqRef = useRef<HTMLCanvasElement>(null);
   // eslint-disable-next-line no-null/no-null
   const absoluteContainerRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line no-null/no-null
+  const undoStack = useRef<TextSnapshot[]>([]);
+  // eslint-disable-next-line no-null/no-null
+  const redoStack = useRef<TextSnapshot[]>([]);
+  // eslint-disable-next-line no-null/no-null
+  const afterPaste = useRef<boolean>(false);
 
   const lang = useOldLang();
   const isContextMenuOpenRef = useRef(false);
@@ -383,8 +395,16 @@ const MessageInput: FC<OwnProps & StateProps> = ({
     // https://levelup.gitconnected.com/javascript-events-handlers-keyboard-and-load-events-1b3e46a6b0c3#1960
     const { isComposing } = e;
 
+    if (inputRef.current && afterPaste.current) {
+      undoStack.current.push({
+        text: inputRef.current.innerText,
+        caretPosition: getCaretPosition(inputRef.current),
+      });
+      afterPaste.current = false;
+    }
+
     const html = getHtml();
-    if (!isComposing && !html && (e.metaKey || e.ctrlKey)) {
+    if (!isComposing && !html && (e.metaKey || e.ctrlKey)) { // Reply to message with arrow up
       const targetIndexDelta = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : undefined;
       if (targetIndexDelta) {
         e.preventDefault();
@@ -392,6 +412,66 @@ const MessageInput: FC<OwnProps & StateProps> = ({
         replyToNextMessage({ targetIndexDelta });
         return;
       }
+    }
+
+    // console.log(`Is commposing: ${isComposing};\nThe key is: ${e.key};\nMeta: ${e.metaKey};\nCtrl: ${e.ctrlKey}`);
+    // isComposing is not needed, that's a special keyboard mode when you type in japanese
+    if (!isComposing
+      && inputRef.current
+      && (e.key === 'z' || e.key === 'y' || e.key === 'Z')
+      && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      focusEditableElement(inputRef.current!, true);
+
+      // console.log('DEBUG: Undo Stack:', undoStack.current, '\n', 'Redo Stack:', redoStack.current);
+      if (e.key === 'z') {
+        const edit = undoStack.current.pop();
+
+        if (inputRef.current.innerText && (edit === undefined || redoStack.current.at(0) !== edit)) {
+          redoStack.current.unshift({
+            text: inputRef.current.innerText,
+            caretPosition: getCaretPosition(inputRef.current),
+          });
+        }
+
+        inputRef.current.innerText = edit?.text || '';
+        if (edit?.caretPosition) {
+          setCaretPosition(inputRef.current, edit.caretPosition);
+        }
+      } else {
+        const edit = redoStack.current.shift();
+        if (!edit) return;
+
+        undoStack.current.push({
+          text: inputRef.current.innerText,
+          caretPosition: getCaretPosition(inputRef.current),
+        });
+
+        inputRef.current.innerText = edit.text;
+        if (edit?.caretPosition) {
+          setCaretPosition(inputRef.current, edit.caretPosition);
+        }
+      }
+
+      return;
+    } else if (!isComposing && inputRef.current && e.key === 'Backspace') {
+      // the innerText is the original one, before a letter/selection getting deleted
+      if (inputRef.current.innerText.length === 0) return;
+
+      undoStack.current.push({
+        text: inputRef.current.innerText,
+        caretPosition: getCaretPosition(inputRef.current),
+      });
+      return;
+    }
+
+    if (!isComposing && inputRef.current && (e.key === 'v' || e.key === 'V')) {
+      undoStack.current.push({
+        text: inputRef.current.innerText,
+        caretPosition: getCaretPosition(inputRef.current),
+      });
+      afterPaste.current = true;
+      return;
     }
 
     if (!isComposing && e.key === 'Enter' && !e.shiftKey) {
@@ -403,14 +483,16 @@ const MessageInput: FC<OwnProps & StateProps> = ({
         )
       ) {
         e.preventDefault();
+        undoStack.current = [];
+        redoStack.current = [];
 
         closeTextFormatter();
         onSend();
       }
-    } else if (!isComposing && e.key === 'ArrowUp' && !html && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    } else if (!isComposing && e.key === 'ArrowUp' && !html && !e.metaKey && !e.ctrlKey && !e.altKey) { // Edit message with arrow up
       e.preventDefault();
       editLastMessage();
-    } else {
+    } else { // selection
       e.target.addEventListener('keyup', processSelectionWithTimeout, { once: true });
     }
   }
